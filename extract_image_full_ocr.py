@@ -79,8 +79,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-tokens",
         type=int,
-        default=int(os.environ.get("DOCLING_MAX_TOKENS", "8192")),
-        help="Maximum output tokens for generic/vLLM endpoints. Default: 8192 (env: DOCLING_MAX_TOKENS)",
+        default=int(os.environ.get("DOCLING_MAX_TOKENS", "4096")),
+        help="Maximum output tokens for generic/vLLM endpoints. Default: 4096 (env: DOCLING_MAX_TOKENS)",
     )
     parser.add_argument(
         "--scale",
