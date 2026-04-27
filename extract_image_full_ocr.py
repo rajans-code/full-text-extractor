@@ -12,8 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from docling.datamodel.base_models import InputFormat
-from docling.datamodel.pipeline_options import VlmConvertOptions, VlmPipelineOptions
-from docling.datamodel.vlm_engine_options import ApiVlmEngineOptions, VlmEngineType
+from docling.datamodel.pipeline_options import VlmPipelineOptions
+from docling.datamodel.pipeline_options_vlm_model import ApiVlmOptions, ResponseFormat
 from docling.document_converter import DocumentConverter, ImageFormatOption, PdfFormatOption
 from docling.pipeline.vlm_pipeline import VlmPipeline
 
@@ -158,58 +158,54 @@ def resolve_ollama_model(requested_model: str | None) -> str:
     )
 
 
-def make_api_engine_options(
+def make_api_vlm_options(
     runtime: str,
     endpoint: str | None,
     model: str | None,
     timeout: float,
     max_tokens: int,
-    no_verify_ssl: bool = False,
-) -> ApiVlmEngineOptions:
-    engine_type = {
-        "ollama": VlmEngineType.API_OLLAMA,
-        "vllm": VlmEngineType.API,
-        "generic": VlmEngineType.API,
-    }[runtime]
-
-    kwargs: dict[str, Any] = {"timeout": timeout}
+    scale: float,
+    max_size: int | None,
+) -> ApiVlmOptions:
     if runtime == "ollama":
         ollama_model = resolve_ollama_model(model)
-        kwargs["params"] = {
+        url = "http://localhost:11434/v1/chat/completions"
+        params: dict[str, Any] = {
             "model": ollama_model,
             "max_tokens": max_tokens,
             "skip_special_tokens": False,
         }
-    elif runtime in {"vllm", "generic"}:
+    else:  # vllm or generic
         if not endpoint:
             endpoint = "http://localhost:8000/v1/chat/completions"
-        kwargs["url"] = endpoint
-        kwargs["params"] = {
+        url = endpoint
+        params = {
             "model": model or DEFAULT_VLLM_MODEL,
             "temperature": 0.0,
             "max_tokens": max_tokens,
             "skip_special_tokens": False,
         }
-        # Pass verify=False to the underlying httpx client when SSL bypass is requested.
-        # This is supported by docling's ApiVlmEngineOptions on recent releases.
-        if no_verify_ssl:
-            kwargs["verify"] = False
 
-    return ApiVlmEngineOptions(engine_type=engine_type, **kwargs)
+    return ApiVlmOptions(
+        url=url,
+        params=params,
+        timeout=timeout,
+        prompt="Convert this page to docling.",
+        response_format=ResponseFormat.DOCTAGS,
+        scale=scale,
+        max_size=max_size,
+        temperature=0.0,
+        stop_strings=["</doctag>", "<|end_of_text|>"],
+    )
 
 
 def build_converter(args: argparse.Namespace) -> DocumentConverter:
-    engine_options = make_api_engine_options(
+    vlm_options = make_api_vlm_options(
         runtime=args.runtime,
         endpoint=args.endpoint,
         model=args.model,
         timeout=args.timeout,
         max_tokens=args.max_tokens,
-        no_verify_ssl=args.no_verify_ssl,
-    )
-    vlm_options = VlmConvertOptions.from_preset(
-        "granite_docling",
-        engine_options=engine_options,
         scale=args.scale,
         max_size=args.max_size,
     )
