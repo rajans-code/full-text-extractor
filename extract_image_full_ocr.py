@@ -286,7 +286,7 @@ def convert_image(args: argparse.Namespace) -> str:
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         _orig_send = requests.Session.send
         def _unverified_send(self, request, **kwargs):  # noqa: ANN001
-            kwargs.setdefault("verify", False)
+            kwargs["verify"] = False  # force-override, setdefault won't work here
             return _orig_send(self, request, **kwargs)
         requests.Session.send = _unverified_send
 
