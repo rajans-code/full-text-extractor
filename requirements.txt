@@ -1,0 +1,6 @@
+# Core document conversion library — pulls in docling-core, docling-ibm-models,
+# and all required ML / image processing transitive dependencies.
+docling>=2.20.0
+
+# Pillow is used directly by the docling VLM pipeline for image resizing / encoding.
+Pillow>=10.0.0
