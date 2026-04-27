@@ -270,18 +270,25 @@ def convert_image(args: argparse.Namespace) -> str:
     if args.no_verify_ssl:
         # WARNING: This disables TLS verification globally for this process.
         # Intended for lab/dev environments with self-signed certificates only.
-        # It affects urllib, requests, and (as a fallback) httpx-based clients.
         warnings.warn(
             "--no-verify-ssl is active. TLS certificate verification is disabled. "
             "Use only in lab or dev environments.",
             stacklevel=2,
         )
-        os.environ["PYTHONHTTPSVERIFY"] = "0"
-        os.environ["CURL_CA_BUNDLE"] = ""
-        os.environ["REQUESTS_CA_BUNDLE"] = ""
-        # Fallback: monkey-patch ssl so any internal urllib/httplib calls
-        # that create their own SSL context also skip verification.
+        # 1. urllib / http.client
         ssl._create_default_https_context = ssl._create_unverified_context  # noqa: SLF001
+        os.environ["PYTHONHTTPSVERIFY"] = "0"
+        # 2. requests / urllib3 — monkey-patch Session.send so that every
+        #    outgoing request (including docling's internal API calls) skips
+        #    certificate verification regardless of how the session was created.
+        import requests
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        _orig_send = requests.Session.send
+        def _unverified_send(self, request, **kwargs):  # noqa: ANN001
+            kwargs.setdefault("verify", False)
+            return _orig_send(self, request, **kwargs)
+        requests.Session.send = _unverified_send
 
     health_check(args)
     converter = build_converter(args)
