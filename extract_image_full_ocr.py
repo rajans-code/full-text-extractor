@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
-import io
 import json
 import os
 import ssl
@@ -14,13 +12,10 @@ from pathlib import Path
 from typing import Any
 
 from docling.datamodel.base_models import InputFormat
-from docling.datamodel.pipeline_options import VlmPipelineOptions
-from docling.datamodel.pipeline_options_vlm_model import ApiVlmOptions, ResponseFormat
+from docling.datamodel.pipeline_options import VlmConvertOptions, VlmPipelineOptions
+from docling.datamodel.vlm_engine_options import ApiVlmEngineOptions, VlmEngineType
 from docling.document_converter import DocumentConverter, ImageFormatOption, PdfFormatOption
 from docling.pipeline.vlm_pipeline import VlmPipeline
-from docling_core.types.doc import DoclingDocument
-from docling_core.types.doc.document import DocTagsDocument
-from PIL import Image
 
 
 DEFAULT_OLLAMA_MODEL = "ibm/granite-docling:latest"
@@ -164,19 +159,23 @@ def resolve_ollama_model(requested_model: str | None) -> str:
     )
 
 
-def make_api_vlm_options(
+def make_api_engine_options(
     runtime: str,
     endpoint: str | None,
     model: str | None,
     timeout: float,
     max_tokens: int,
-    scale: float,
-    max_size: int | None,
-) -> ApiVlmOptions:
+) -> ApiVlmEngineOptions:
+    engine_type = {
+        "ollama": VlmEngineType.API_OLLAMA,
+        "vllm": VlmEngineType.API,
+        "generic": VlmEngineType.API,
+    }[runtime]
+
+    kwargs: dict[str, Any] = {"timeout": timeout}
     if runtime == "ollama":
         ollama_model = resolve_ollama_model(model)
-        url = "http://localhost:11434/v1/chat/completions"
-        params: dict[str, Any] = {
+        kwargs["params"] = {
             "model": ollama_model,
             "max_tokens": max_tokens,
             "skip_special_tokens": False,
@@ -184,34 +183,28 @@ def make_api_vlm_options(
     else:  # vllm or generic
         if not endpoint:
             endpoint = "http://localhost:8000/v1/chat/completions"
-        url = endpoint
-        params = {
+        kwargs["url"] = endpoint
+        kwargs["params"] = {
             "model": model or DEFAULT_VLLM_MODEL,
             "temperature": 0.0,
             "max_tokens": max_tokens,
             "skip_special_tokens": False,
         }
 
-    return ApiVlmOptions(
-        url=url,
-        params=params,
-        timeout=timeout,
-        prompt="Convert this page to docling.",
-        response_format=ResponseFormat.DOCTAGS,
-        scale=scale,
-        max_size=max_size,
-        temperature=0.0,
-        stop_strings=["</doctag>", "<|end_of_text|>"],
-    )
+    return ApiVlmEngineOptions(engine_type=engine_type, **kwargs)
 
 
 def build_converter(args: argparse.Namespace) -> DocumentConverter:
-    vlm_options = make_api_vlm_options(
+    engine_options = make_api_engine_options(
         runtime=args.runtime,
         endpoint=args.endpoint,
         model=args.model,
         timeout=args.timeout,
         max_tokens=args.max_tokens,
+    )
+    vlm_options = VlmConvertOptions.from_preset(
+        "granite_docling",
+        engine_options=engine_options,
         scale=args.scale,
         max_size=args.max_size,
     )
@@ -266,114 +259,6 @@ def health_check(args: argparse.Namespace) -> None:
         ) from exc
 
 
-def prepare_image_for_vllm(input_path: Path, max_size: int | None) -> tuple[Image.Image, str]:
-    if input_path.suffix.lower() not in IMAGE_SUFFIXES:
-        raise ValueError(
-            "The streaming vLLM path currently accepts image files only. "
-            "Render PDFs to page images first, then run one page at a time."
-        )
-
-    image = Image.open(input_path)
-    # Palette (P) images may carry index-based transparency; convert via RGBA
-    # so that transparent areas are composited onto white instead of turning black.
-    if image.mode == "P":
-        image = image.convert("RGBA")
-    if image.mode in ("RGBA", "LA"):
-        background = Image.new("RGB", image.size, (255, 255, 255))
-        background.paste(image, mask=image.split()[-1])
-        image = background
-    elif image.mode != "RGB":
-        image = image.convert("RGB")
-    if max_size:
-        image.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
-
-    buffer = io.BytesIO()
-    image.save(buffer, format="PNG")
-    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
-    return image, f"data:image/png;base64,{encoded}"
-
-
-def parse_streaming_chat_response(response: Any) -> str:
-    chunks: list[str] = []
-    for raw_line in response:
-        line = raw_line.decode("utf-8", errors="replace").strip()
-        if not line or not line.startswith("data:"):
-            continue
-
-        event = line.removeprefix("data:").strip()
-        if event == "[DONE]":
-            break
-
-        payload = json.loads(event)
-        for choice in payload.get("choices", []):
-            content = choice.get("delta", {}).get("content")
-            if content:
-                chunks.append(content)
-
-    return "".join(chunks)
-
-
-def convert_vllm_streaming(args: argparse.Namespace, input_path: Path) -> str:
-    endpoint = args.endpoint or "http://localhost:8000/v1/chat/completions"
-    image, data_url = prepare_image_for_vllm(input_path, args.max_size)
-    payload = {
-        "model": args.model or DEFAULT_VLLM_MODEL,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "Convert this page to docling."},
-                    {"type": "image_url", "image_url": {"url": data_url}},
-                ],
-            }
-        ],
-        "temperature": 0.0,
-        "max_completion_tokens": args.max_tokens,
-        "stream": True,
-        "stop": ["</doctag>", "<|end_of_text|>"],
-    }
-
-    ssl_ctx: ssl.SSLContext | None = None
-    if args.no_verify_ssl and endpoint.startswith("https://"):
-        ssl_ctx = ssl.create_default_context()
-        ssl_ctx.check_hostname = False
-        ssl_ctx.verify_mode = ssl.CERT_NONE
-
-    request = urllib.request.Request(
-        endpoint,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=args.timeout, context=ssl_ctx) as response:
-            doctags = parse_streaming_chat_response(response)
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"vLLM returned HTTP {exc.code}: {detail}") from exc
-    except (urllib.error.URLError, TimeoutError) as exc:
-        raise RuntimeError(f"Could not complete streaming vLLM request: {exc}") from exc
-
-    if not doctags.strip():
-        raise RuntimeError("vLLM returned an empty streamed DocTags response.")
-
-    # Ensure the full <doctag>...</doctag> wrapper is present.
-    # The model sometimes omits the opening tag, the closing tag, or both.
-    if not doctags.lstrip().startswith("<doctag>"):
-        doctags = "<doctag>" + doctags
-    if "</doctag>" not in doctags:
-        doctags = doctags.rstrip() + "</doctag>"
-
-    doctags_doc = DocTagsDocument.from_doctags_and_image_pairs([doctags], [image])
-    document = DoclingDocument.load_from_doctags(
-        doctags_doc,
-        document_name=input_path.stem,
-    )
-    extracted_markdown = document.export_to_markdown()
-    if not extracted_markdown.strip():
-        print(f"DEBUG raw doctags ({len(doctags)} chars): {doctags[:400]!r}", file=sys.stderr)
-        raise RuntimeError("DocTags conversion returned empty Markdown.")
-    return extracted_markdown
 
 
 def convert_image(args: argparse.Namespace) -> str:
@@ -407,9 +292,6 @@ def convert_image(args: argparse.Namespace) -> str:
         requests.Session.send = _unverified_send
 
     health_check(args)
-    if args.runtime == "vllm":
-        return convert_vllm_streaming(args, input_path)
-
     converter = build_converter(args)
     result = converter.convert(source=input_path)
     extracted_markdown = result.document.export_to_markdown()
