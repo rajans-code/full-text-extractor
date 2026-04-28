@@ -357,7 +357,10 @@ def convert_vllm_streaming(args: argparse.Namespace, input_path: Path) -> str:
     if not doctags.strip():
         raise RuntimeError("vLLM returned an empty streamed DocTags response.")
 
-    # Ensure the closing tag is present; the model may stop mid-stream.
+    # Ensure the full <doctag>...</doctag> wrapper is present.
+    # The model sometimes omits the opening tag, the closing tag, or both.
+    if not doctags.lstrip().startswith("<doctag>"):
+        doctags = "<doctag>" + doctags
     if "</doctag>" not in doctags:
         doctags = doctags.rstrip() + "</doctag>"
 
