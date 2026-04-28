@@ -273,7 +273,17 @@ def prepare_image_for_vllm(input_path: Path, max_size: int | None) -> tuple[Imag
             "Render PDFs to page images first, then run one page at a time."
         )
 
-    image = Image.open(input_path).convert("RGB")
+    image = Image.open(input_path)
+    # Palette (P) images may carry index-based transparency; convert via RGBA
+    # so that transparent areas are composited onto white instead of turning black.
+    if image.mode == "P":
+        image = image.convert("RGBA")
+    if image.mode in ("RGBA", "LA"):
+        background = Image.new("RGB", image.size, (255, 255, 255))
+        background.paste(image, mask=image.split()[-1])
+        image = background
+    elif image.mode != "RGB":
+        image = image.convert("RGB")
     if max_size:
         image.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
 
@@ -320,6 +330,7 @@ def convert_vllm_streaming(args: argparse.Namespace, input_path: Path) -> str:
         "temperature": 0.0,
         "max_completion_tokens": args.max_tokens,
         "stream": True,
+        "stop": ["</doctag>", "<|end_of_text|>"],
     }
 
     ssl_ctx: ssl.SSLContext | None = None
@@ -346,6 +357,10 @@ def convert_vllm_streaming(args: argparse.Namespace, input_path: Path) -> str:
     if not doctags.strip():
         raise RuntimeError("vLLM returned an empty streamed DocTags response.")
 
+    # Ensure the closing tag is present; the model may stop mid-stream.
+    if "</doctag>" not in doctags:
+        doctags = doctags.rstrip() + "</doctag>"
+
     doctags_doc = DocTagsDocument.from_doctags_and_image_pairs([doctags], [image])
     document = DoclingDocument.load_from_doctags(
         doctags_doc,
@@ -353,6 +368,7 @@ def convert_vllm_streaming(args: argparse.Namespace, input_path: Path) -> str:
     )
     extracted_markdown = document.export_to_markdown()
     if not extracted_markdown.strip():
+        print(f"DEBUG raw doctags ({len(doctags)} chars): {doctags[:400]!r}", file=sys.stderr)
         raise RuntimeError("DocTags conversion returned empty Markdown.")
     return extracted_markdown
 
