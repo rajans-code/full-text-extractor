@@ -1,5 +1,6 @@
 from __future__ import annotations
-
+import http.client
+http.client.HTTPConnection.debuglevel = 1
 import argparse
 import base64
 import io
