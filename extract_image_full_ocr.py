@@ -319,17 +319,37 @@ def prepare_image_for_vllm(input_path: Path, max_size: int | None) -> tuple[Imag
 
 
 def parse_streaming_chat_response(response: Any) -> str:
+    raw_bytes = response.read()
+    raw_text = raw_bytes.decode("utf-8", errors="replace")
+
+    # Non-streaming: plain JSON object
+    stripped = raw_text.strip()
+    if stripped.startswith("{"):
+        try:
+            payload = json.loads(stripped)
+            for choice in payload.get("choices", []):
+                content = (
+                    choice.get("message", {}).get("content")
+                    or choice.get("delta", {}).get("content")
+                )
+                if content:
+                    return content
+        except json.JSONDecodeError:
+            pass
+
+    # Streaming: SSE lines
     chunks: list[str] = []
-    for raw_line in response:
-        line = raw_line.decode("utf-8", errors="replace").strip()
+    for raw_line in stripped.splitlines():
+        line = raw_line.strip()
         if not line or not line.startswith("data:"):
             continue
-
         event = line.removeprefix("data:").strip()
         if event == "[DONE]":
             break
-
-        payload = json.loads(event)
+        try:
+            payload = json.loads(event)
+        except json.JSONDecodeError:
+            continue
         for choice in payload.get("choices", []):
             content = choice.get("delta", {}).get("content")
             if content:
