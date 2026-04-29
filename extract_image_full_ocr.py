@@ -117,7 +117,30 @@ def parse_args() -> argparse.Namespace:
             "(env: DOCLING_NO_VERIFY_SSL)."
         ),
     )
+    parser.add_argument(
+        "--token",
+        default=os.environ.get("DOCLING_TOKEN"),
+        help=(
+            "Bearer token for the remote endpoint (e.g. 'oc whoami -t'). "
+            "Falls back to the mounted ServiceAccount token at "
+            "/var/run/secrets/kubernetes.io/serviceaccount/token when available "
+            "(env: DOCLING_TOKEN)."
+        ),
+    )
     return parser.parse_args()
+
+
+SA_TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+
+
+def resolve_token(token_arg: str | None) -> str | None:
+    """Return a Bearer token from --token, DOCLING_TOKEN, or the mounted SA token."""
+    if token_arg:
+        return token_arg
+    sa_path = Path(SA_TOKEN_PATH)
+    if sa_path.exists():
+        return sa_path.read_text(encoding="utf-8").strip()
+    return None
 
 
 def get_ollama_models() -> list[str]:
@@ -238,7 +261,7 @@ def build_converter(args: argparse.Namespace) -> DocumentConverter:
     )
 
 
-def health_check(args: argparse.Namespace) -> None:
+def health_check(args: argparse.Namespace, token: str | None = None) -> None:
     if args.skip_health_check:
         return
 
@@ -254,7 +277,10 @@ def health_check(args: argparse.Namespace) -> None:
         ssl_ctx.check_hostname = False
         ssl_ctx.verify_mode = ssl.CERT_NONE
 
-    request = urllib.request.Request(url, method="GET")
+    headers: dict[str, str] = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, method="GET", headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=5, context=ssl_ctx) as response:
             if response.status >= 400:
@@ -312,7 +338,7 @@ def parse_streaming_chat_response(response: Any) -> str:
     return "".join(chunks)
 
 
-def convert_vllm_streaming(args: argparse.Namespace, input_path: Path) -> str:
+def convert_vllm_streaming(args: argparse.Namespace, input_path: Path, token: str | None = None) -> str:
     endpoint = args.endpoint or "http://localhost:8000/v1/chat/completions"
     image, data_url = prepare_image_for_vllm(input_path, args.max_size)
     payload = {
@@ -338,10 +364,13 @@ def convert_vllm_streaming(args: argparse.Namespace, input_path: Path) -> str:
         ssl_ctx.check_hostname = False
         ssl_ctx.verify_mode = ssl.CERT_NONE
 
+    req_headers: dict[str, str] = {"Content-Type": "application/json"}
+    if token:
+        req_headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(
         endpoint,
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers=req_headers,
         method="POST",
     )
     try:
@@ -413,10 +442,22 @@ def convert_image(args: argparse.Namespace) -> str:
             return _orig_send(self, request, **kwargs)
         requests.Session.send = _unverified_send
 
-    health_check(args)
+    token = resolve_token(args.token)
+    if token:
+        # Inject the token for docling's internal requests (generic/ollama paths)
+        import requests
+        import urllib3
+        _orig_send = requests.Session.send
+        def _authed_send(self, request, **kwargs):  # noqa: ANN001
+            if "Authorization" not in request.headers:
+                request.headers["Authorization"] = f"Bearer {token}"
+            return _orig_send(self, request, **kwargs)
+        requests.Session.send = _authed_send
+
+    health_check(args, token=token)
 
     if args.runtime == "vllm":
-        return convert_vllm_streaming(args, input_path)
+        return convert_vllm_streaming(args, input_path, token=token)
 
     converter = build_converter(args)
     result = converter.convert(source=input_path)
